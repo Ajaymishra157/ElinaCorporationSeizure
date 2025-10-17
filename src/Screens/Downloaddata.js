@@ -377,7 +377,7 @@ const Downloaddata = ({ navigation }) => {
                                 width={280}
                                 height={10}
                                 borderRadius={5}
-                                color="#7c7775ff"
+                                color="#050505ff"
                                 style={{ marginTop: 15 }}
                             />
 

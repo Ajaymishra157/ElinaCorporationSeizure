@@ -31,7 +31,7 @@ const FirstScreen = () => {
 
 
 
-
+  const { modalopen } = route.params || {};
   const inputRef = useRef(null);
   const [wasInputFocused, setWasInputFocused] = useState(false);
 
@@ -1056,7 +1056,7 @@ const FirstScreen = () => {
     }
   };
 
-  const handleSearch = (query) => {
+  const handleSearch = async (query) => {
 
     if (!isAppAvailable) {
       ToastAndroid.show(appStatusMessage, ToastAndroid.LONG);
@@ -1074,6 +1074,7 @@ const FirstScreen = () => {
 
     setSearchQuery('');
     // setSearchLoading(true);
+    const userType = await AsyncStorage.getItem('user_type');
 
     let sql = '';
     let params = [];
@@ -1135,8 +1136,17 @@ const FirstScreen = () => {
               key = row.engine_no;
             }
 
-            if (!uniqueMap.has(key)) {
-              uniqueMap.set(key, row);
+            // ✅ For normal users: Show only unique entries (no duplicates)
+            if (userType === 'normal') {
+              if (!uniqueMap.has(key)) {
+                uniqueMap.set(key, row);
+              }
+            }
+            // ✅ For other user types (full/admin): Show all entries including duplicates
+            else {
+              // Create a unique key by combining the main key with ID to allow duplicates
+              const uniqueKey = `${key}_${row.id}`;
+              uniqueMap.set(uniqueKey, row);
             }
           }
 
@@ -1618,7 +1628,7 @@ const FirstScreen = () => {
                               paddingHorizontal: 15,
                               paddingVertical: 10,
                               borderRadius: 8,
-                              backgroundColor: selectedOption === item.value ? '#c5e8e4' : 'transparent',
+                              backgroundColor: selectedOption === item.value ? '#7c7775ff' : 'transparent',
 
                             }}
                             onPress={() => {

@@ -993,7 +993,7 @@ const Menus = ({ navigation }) => {
 
 
                 {/* Wheel Type Selection - NEW SECTION */}
-                <View style={{ marginBottom: 20 }}>
+                {/* <View style={{ marginBottom: 20 }}>
                   <Text style={{ fontSize: 16, fontFamily: 'Inter-Bold', marginBottom: 15, color: 'black' }}>
                     Vehicle Type
                   </Text>
@@ -1045,7 +1045,7 @@ const Menus = ({ navigation }) => {
                       </TouchableOpacity>
                     ))}
                   </View>
-                </View>
+                </View> */}
 
 
                 {/* Save Button */}
