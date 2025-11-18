@@ -10,6 +10,7 @@ import {
   ScrollView,
   Platform,
   PermissionsAndroid,
+  Keyboard,
 } from 'react-native';
 import React, { useState, useEffect } from 'react';
 import Fontisto from 'react-native-vector-icons/Fontisto';
@@ -39,6 +40,83 @@ const LoginScreen = () => {
   const [locationPermission, setLocationPermission] = useState(false);
   const [gpsEnabled, setGpsEnabled] = useState(false);
   const [showGpsModal, setShowGpsModal] = useState(false);
+
+
+  const [Agencydata, setAgencyData] = useState('');
+  const [agencyName, setAgencyName] = useState('');
+  const [agencyAddress, setAgencyAddress] = useState('');
+  const [agencyMobile, setAgencyMobile] = useState('');
+
+
+
+  const [showAgencyDetails, setShowAgencyDetails] = useState(false);
+
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+
+
+  useEffect(() => {
+    const keyboardDidShowListener = Keyboard.addListener('keyboardDidShow', () => {
+      setKeyboardVisible(true);
+    });
+    const keyboardDidHideListener = Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardVisible(false);
+    });
+
+    return () => {
+      keyboardDidShowListener.remove();
+      keyboardDidHideListener.remove();
+    };
+  }, []);
+
+
+  const AgencyDetailApi = async () => {
+    try {
+      const response = await fetch(ENDPOINTS.AgencyDetail, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const result = await response.json();
+
+
+      if (result.code === 200 && Array.isArray(result.payload)) {
+
+        setAgencyData(result.payload);
+        const agencyDetail = result.payload.find(
+          item => item.type === 'agency_details_show'
+        );
+
+
+
+        if (agencyDetail && agencyDetail.value.toLowerCase() === 'yes') {
+
+          setShowAgencyDetails(true); // show section
+
+        } else {
+          setShowAgencyDetails(false); // hide section
+        }
+        // Set individual states
+        setAgencyName(agencyDetail?.agency_name || '');
+        setAgencyAddress(agencyDetail?.agency_address || '');
+        setAgencyMobile(agencyDetail?.agency_mobile || '');
+      } else {
+        setShowAgencyDetails(false);
+        setAgencyName('');
+        setAgencyAddress('');
+        setAgencyMobile('');
+      }
+
+    } catch (error) {
+      console.log('❌ Error fetching agency details:', error.message);
+      setShowAgencyDetails(false); // default to hide
+      setAgencyData([]);
+    }
+  };
+
+  useEffect(() => {
+    AgencyDetailApi();
+  }, []);
 
   // ✅ Request Android Notification Permission (Android 13+)
   async function requestAndroidNotificationPermission() {
@@ -196,7 +274,7 @@ const LoginScreen = () => {
         backgroundColor: 'white',
         justifyContent: 'center',
       }}>
-      <ScrollView contentContainerStyle={{ flexGrow: 1, alignItems: 'center', backgroundColor: 'white', paddingTop: 120, paddingBottom: 300 }}
+      <ScrollView contentContainerStyle={{ flexGrow: 1, alignItems: 'center', backgroundColor: 'white', paddingTop: 120, paddingBottom: keyboardVisible ? 340 : 85, }}
         keyboardShouldPersistTaps='handled' >
         <View style={{ height: 200 }}>
           <Image
@@ -367,6 +445,115 @@ const LoginScreen = () => {
           </TouchableOpacity>
 
         </View>
+
+        {/* Divider */}
+        {(agencyAddress || agencyName || agencyMobile) && (
+          <View
+            style={{
+              height: 2,
+              backgroundColor: '#d1d5db',
+              marginVertical: 25,
+              width: '100%',
+              alignSelf: 'center',
+            }}
+          />
+        )}
+        {showAgencyDetails && (
+          <View style={{ alignItems: 'center', marginTop: 10 }}>
+            {(agencyAddress || agencyName || agencyMobile) && (
+              <Text
+                style={{
+                  color: '#0a0a0aff',
+                  fontFamily: 'Inter-Bold',
+
+                  fontSize: 14,
+                  textAlign: 'center',
+                  letterSpacing: 1,
+                  textTransform: 'uppercase',
+                }}>
+                AGENCY DETAILS
+              </Text>
+            )}
+            {agencyName && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginTop: 6,
+                  gap: 8
+                }}>
+
+                <Text
+                  style={{
+                    fontFamily: 'Inter-Medium',
+                    fontSize: 16,
+                    textAlign: 'center',
+                  }}>
+                  <Text style={{ color: 'black' }}>{agencyName}</Text>
+
+                </Text>
+
+
+              </View>
+            )}
+
+
+            {agencyAddress && (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  justifyContent: 'center',
+                  marginTop: 8,
+                  paddingHorizontal: 20,
+                }}>
+
+                <Image source={require('../assets/images/google-maps.png')} style={{ width: 20, height: 20 }} />
+                <Text
+                  style={{
+                    color: '#0a0a0aff',
+                    fontFamily: 'Inter-Regular',
+                    fontSize: 14,
+                    marginLeft: 6,
+                    textAlign: 'center',
+                    flex: 1,
+                  }}>
+                  {agencyAddress}
+                </Text>
+              </View>
+            )}
+
+            {agencyMobile && (
+              <TouchableOpacity
+                onPress={() => {
+                  const phoneNumber = `tel:${agencyMobile}`;
+                  Linking.openURL(phoneNumber).catch(err =>
+                    console.log('Error opening dialer', err)
+                  );
+                }}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginTop: 6,
+                  gap: 5
+
+                }}>
+                <Image source={require('../assets/images/Call.png')} style={{ width: 20, height: 20 }} />
+                <Text
+                  style={{
+                    color: 'blue',
+                    fontSize: 15,
+                    marginLeft: 6,
+                    textDecorationLine: 'underline',
+                  }}>
+                  {agencyMobile}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
 
       </ScrollView>
 

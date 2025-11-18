@@ -1056,15 +1056,130 @@ const FirstScreen = () => {
     }
   };
 
+  // const handleSearch = async (query) => {
+
+  //   if (!isAppAvailable) {
+  //     ToastAndroid.show(appStatusMessage, ToastAndroid.LONG);
+  //     setSearchVehicle([]); // ✅ Clear any previous results
+  //     setSearchPerformed(false); // ✅ Reset search performed flag
+  //     return; // ✅ IMPORTANT: Return early, don't proceed with search
+  //   }
+
+
+  //   if (!query) {
+  //     setSearchVehicle([]);
+  //     setSearchLoading(false);
+  //     return;
+  //   }
+
+  //   setSearchQuery('');
+  //   // setSearchLoading(true);
+  //   const userType = await AsyncStorage.getItem('user_type');
+
+  //   let sql = '';
+  //   let params = [];
+
+  //   // Helper → build prefix and nextPrefix
+  //   const makeRange = (prefix) => {
+  //     if (!prefix) return ['', ''];
+  //     const lastChar = prefix.slice(-1);
+  //     const nextChar = String.fromCharCode(lastChar.charCodeAt(0) + 1);
+  //     const nextPrefix = prefix.slice(0, -1) + nextChar;
+  //     return [prefix, nextPrefix];
+  //   };
+
+  //   // Prefix for number fields
+  //   let prefix = query.toUpperCase();
+  //   let range = makeRange(prefix);
+
+  //   // Build SQL depending on search type
+  //   if (scheduleType === "Reg No") {
+  //     sql = `SELECT id, registration_number, type, product 
+  //            FROM vehicles 
+  //            WHERE last_reg_no >= ? AND last_reg_no < ?`;
+  //     params = range;
+  //   } else if (scheduleType === "Chassis No") {
+  //     sql = `SELECT id, chassis_number, type, product 
+  //            FROM vehicles 
+  //            WHERE last_chassis_no >= ? AND last_chassis_no < ?`;
+  //     params = range;
+  //   } else if (scheduleType === "Engine No") {
+  //     sql = `SELECT id, engine_number, type, product 
+  //            FROM vehicles 
+  //            WHERE last_engine_no >= ? AND last_engine_no < ?`;
+  //     params = range;
+  //   }
+
+  //   // ✅ Add state filter if user selected a state
+  //   if (SelectedState !== "All") {
+  //     sql += " AND state_code = ?";
+  //     params.push(SelectedState);
+  //   }
+
+  //   // Run search query
+  //   db.transaction(tx => {
+  //     tx.executeSql(
+  //       sql,
+  //       params,
+  //       (tx, results) => {
+  //         const uniqueMap = new Map();
+
+  //         for (let i = 0; i < results.rows.length; i++) {
+  //           const row = results.rows.item(i);
+
+  //           let key = '';
+  //           if (scheduleType === "Reg No") {
+  //             key = row.registration_number;
+  //           } else if (scheduleType === "Chassis No") {
+  //             key = row.chassis_number;
+  //           } else if (scheduleType === "Engine No") {
+  //             key = row.engine_number;
+  //           }
+
+  //           // ✅ For normal users: Show only unique entries (no duplicates)
+  //           if (userType === 'normal') {
+  //             if (!uniqueMap.has(key)) {
+  //               uniqueMap.set(key, row);
+  //             }
+  //           }
+  //           // ✅ For other user types (full/admin): Show all entries including duplicates
+  //           else {
+  //             // Create a unique key by combining the main key with ID to allow duplicates
+  //             const uniqueKey = `${key}_${row.id}`;
+  //             uniqueMap.set(uniqueKey, row);
+  //           }
+  //         }
+
+  //         const uniqueRows = Array.from(uniqueMap.values());
+
+  //         setSearchVehicle(uniqueRows);
+  //         setSearchPerformed(true);
+  //         console.log(`🔍 Found ${uniqueRows.length} unique vehicles`);
+  //         setSearchLoading(false);
+
+  //         // 👇 scroll to top after new search
+  //         if (flatListRef.current) {
+  //           flatListRef.current.scrollToOffset({ animated: false, offset: 0 });
+  //         }
+  //       },
+  //       (tx, error) => {
+  //         console.error("❌ Error executing query:", error);
+  //         setSearchLoading(false);
+  //       }
+  //     );
+  //   });
+  // };
+
+
+
   const handleSearch = async (query) => {
 
     if (!isAppAvailable) {
       ToastAndroid.show(appStatusMessage, ToastAndroid.LONG);
-      setSearchVehicle([]); // ✅ Clear any previous results
-      setSearchPerformed(false); // ✅ Reset search performed flag
-      return; // ✅ IMPORTANT: Return early, don't proceed with search
+      setSearchVehicle([]);
+      setSearchPerformed(false);
+      return;
     }
-
 
     if (!query) {
       setSearchVehicle([]);
@@ -1073,102 +1188,115 @@ const FirstScreen = () => {
     }
 
     setSearchQuery('');
-    // setSearchLoading(true);
     const userType = await AsyncStorage.getItem('user_type');
 
-    let sql = '';
+    let sql = "";
     let params = [];
 
-    // Helper → build prefix and nextPrefix
+    // Helper → prefix range
     const makeRange = (prefix) => {
       if (!prefix) return ['', ''];
-      const lastChar = prefix.slice(-1);
-      const nextChar = String.fromCharCode(lastChar.charCodeAt(0) + 1);
-      const nextPrefix = prefix.slice(0, -1) + nextChar;
-      return [prefix, nextPrefix];
+      const last = prefix.slice(-1);
+      const next = String.fromCharCode(last.charCodeAt(0) + 1);
+      return [prefix, prefix.slice(0, -1) + next];
     };
 
-    // Prefix for number fields
-    let prefix = query.toUpperCase();
-    let range = makeRange(prefix);
+    const prefix = query.toUpperCase();
+    const range = makeRange(prefix);
 
-    // Build SQL depending on search type
+    // ⭐ Always select state_code also
+    const baseSelect = `
+      SELECT id, registration_number, chassis_number, engine_number,
+             type, product, state_code, last_reg_no, last_chassis_no, last_engine_no
+      FROM vehicles
+  `;
+
+    // Build SQL based on search type
     if (scheduleType === "Reg No") {
-      sql = `SELECT id, registration_number, type, product 
-             FROM vehicles 
-             WHERE last_reg_no >= ? AND last_reg_no < ?`;
+      sql = `${baseSelect}
+           WHERE last_reg_no >= ? AND last_reg_no < ?
+           AND state_code != 'All'`;
       params = range;
-    } else if (scheduleType === "Chassis No") {
-      sql = `SELECT id, chassis_no, type, product 
-             FROM vehicles 
-             WHERE last_chassis_no >= ? AND last_chassis_no < ?`;
+    }
+    else if (scheduleType === "Chassis No") {
+      sql = `${baseSelect}
+           WHERE last_chassis_no >= ? AND last_chassis_no < ?
+           AND state_code != 'All'`;
       params = range;
-    } else if (scheduleType === "Engine No") {
-      sql = `SELECT id, engine_no, type, product 
-             FROM vehicles 
-             WHERE last_engine_no >= ? AND last_engine_no < ?`;
+    }
+    else if (scheduleType === "Engine No") {
+      sql = `${baseSelect}
+           WHERE last_engine_no >= ? AND last_engine_no < ?
+           AND state_code != 'All'`;
       params = range;
     }
 
-    // ✅ Add state filter if user selected a state
+    // Optional selected state
     if (SelectedState !== "All") {
       sql += " AND state_code = ?";
       params.push(SelectedState);
     }
 
-    // Run search query
-    db.transaction(tx => {
+    // ⭐ GJ TOP SORTING
+    sql += `
+ ORDER BY 
+  CASE 
+    WHEN state_code = 'GJ' THEN 0 
+    WHEN state_code = 'MH' THEN 1 
+    WHEN state_code = 'MP' THEN 2 
+    WHEN state_code = 'RJ' THEN 3 
+    ELSE 4 
+  END,
+  last_reg_no ASC
+  `;
+
+    console.log("📘 FINAL SQL:", sql);
+    console.log("📗 PARAMS:", params);
+
+    db.transaction((tx) => {
       tx.executeSql(
         sql,
         params,
         (tx, results) => {
+
           const uniqueMap = new Map();
 
           for (let i = 0; i < results.rows.length; i++) {
             const row = results.rows.item(i);
 
-            let key = '';
-            if (scheduleType === "Reg No") {
-              key = row.registration_number;
-            } else if (scheduleType === "Chassis No") {
-              key = row.chassis_no;
-            } else if (scheduleType === "Engine No") {
-              key = row.engine_no;
-            }
+            console.log("🟦 Row State:", row.state_code); // DEBUG
 
-            // ✅ For normal users: Show only unique entries (no duplicates)
-            if (userType === 'normal') {
-              if (!uniqueMap.has(key)) {
-                uniqueMap.set(key, row);
-              }
-            }
-            // ✅ For other user types (full/admin): Show all entries including duplicates
-            else {
-              // Create a unique key by combining the main key with ID to allow duplicates
-              const uniqueKey = `${key}_${row.id}`;
-              uniqueMap.set(uniqueKey, row);
+            let key = "";
+            if (scheduleType === "Reg No") key = row.registration_number;
+            if (scheduleType === "Chassis No") key = row.chassis_number;
+            if (scheduleType === "Engine No") key = row.engine_number;
+
+            if (userType === "normal") {
+              if (!uniqueMap.has(key)) uniqueMap.set(key, row);
+            } else {
+              uniqueMap.set(`${key}_${row.id}`, row);
             }
           }
 
-          const uniqueRows = Array.from(uniqueMap.values());
+          const finalList = Array.from(uniqueMap.values());
+          console.log("🔍 Final rows:", finalList.length);
 
-          setSearchVehicle(uniqueRows);
+          setSearchVehicle(finalList);
           setSearchPerformed(true);
-          console.log(`🔍 Found ${uniqueRows.length} unique vehicles`);
           setSearchLoading(false);
 
-          // 👇 scroll to top after new search
           if (flatListRef.current) {
             flatListRef.current.scrollToOffset({ animated: false, offset: 0 });
           }
         },
-        (tx, error) => {
-          console.error("❌ Error executing query:", error);
+        (tx, err) => {
+          console.log("❌ SQL Error:", err);
           setSearchLoading(false);
         }
       );
     });
   };
+
 
   function formatIndianNumber(num) {
     if (!num) return "0";
@@ -1237,8 +1365,8 @@ const FirstScreen = () => {
           {scheduleType === "Reg No"
             ? (item.registration_number || "-----")
             : scheduleType === "Chassis No"
-              ? (item.chassis_no || "-----")
-              : (item.engine_no || "-----")}
+              ? (item.chassis_number || "-----")
+              : (item.engine_number || "-----")}
         </Text>
       </View>
       <View style={{ width: '50%', justifyContent: 'center', alignItems: 'flex-start' }}>
@@ -1302,8 +1430,8 @@ const FirstScreen = () => {
           {scheduleType === 'Reg No'
             ? item.registration_number || '-----'
             : scheduleType === 'Chassis No'
-              ? item.chassis_no || '-----'
-              : item.engine_no || '-----'}
+              ? item.chassis_number || '-----'
+              : item.engine_number || '-----'}
         </Text>
       </View>
     </TouchableOpacity>
@@ -2028,52 +2156,53 @@ const FirstScreen = () => {
                 ) : isAppAvailable && SearchVehicle.length > 0 ? (
                   <FlatList
                     ref={flatListRef}
-                    data={
-                      listType === "Grid"
-                        ? transformToColumnWise(
-                          [...SearchVehicle].sort((a, b) => {
-                            const fieldA =
-                              scheduleType === "Reg No"
-                                ? a.registration_number
-                                : scheduleType === "Chassis No"
-                                  ? a.chassis_no
-                                  : a.engine_no;
+                    // data={
+                    //   listType === "Grid"
+                    //     ? transformToColumnWise(
+                    //       [...SearchVehicle].sort((a, b) => {
+                    //         const fieldA =
+                    //           scheduleType === "Reg No"
+                    //             ? a.registration_number
+                    //             : scheduleType === "Chassis No"
+                    //               ? a.chassis_number
+                    //               : a.engine_number;
 
-                            const fieldB =
-                              scheduleType === "Reg No"
-                                ? b.registration_number
-                                : scheduleType === "Chassis No"
-                                  ? b.chassis_no
-                                  : b.engine_no;
+                    //         const fieldB =
+                    //           scheduleType === "Reg No"
+                    //             ? b.registration_number
+                    //             : scheduleType === "Chassis No"
+                    //               ? b.chassis_number
+                    //               : b.engine_number;
 
-                            return (fieldA || "").localeCompare(fieldB || "");
-                          })
-                        )
-                        : [...SearchVehicle].sort((a, b) => {
-                          const fieldA =
-                            scheduleType === "Reg No"
-                              ? a.registration_number
-                              : scheduleType === "Chassis No"
-                                ? a.chassis_no
-                                : a.engine_no;
+                    //         return (fieldA || "").localeCompare(fieldB || "");
+                    //       })
+                    //     )
+                    //     : [...SearchVehicle].sort((a, b) => {
+                    //       const fieldA =
+                    //         scheduleType === "Reg No"
+                    //           ? a.registration_number
+                    //           : scheduleType === "Chassis No"
+                    //             ? a.chassis_number
+                    //             : a.engine_number;
 
-                          const fieldB =
-                            scheduleType === "Reg No"
-                              ? b.registration_number
-                              : scheduleType === "Chassis No"
-                                ? b.chassis_no
-                                : b.engine_no;
+                    //       const fieldB =
+                    //         scheduleType === "Reg No"
+                    //           ? b.registration_number
+                    //           : scheduleType === "Chassis No"
+                    //             ? b.chassis_number
+                    //             : b.engine_number;
 
-                          return (fieldA || "").localeCompare(fieldB || "");
-                        })
-                    }
+                    //       return (fieldA || "").localeCompare(fieldB || "");
+                    //     })
+                    // }
+                    data={SearchVehicle}
                     extraData={SearchVehicle}
                     keyExtractor={(item) => item.id.toString()}
                     renderItem={listType === 'Grid' ? renderGridItem : renderItem}
                     numColumns={listType === 'Grid' ? 2 : 1}
                     key={listType === 'Grid' ? 'g' : 'l'} // Force re-render on layout change
                     keyboardShouldPersistTaps="handled"
-                    contentContainerStyle={{ paddingHorizontal: 10, paddingBottom: keyboardVisible ? 340 : 30 }}
+                    contentContainerStyle={{ paddingHorizontal: 10, paddingBottom: keyboardVisible ? 340 : 80 }}
                     columnWrapperStyle={listType === 'Grid' ? { justifyContent: 'space-between' } : null}
                   />
                 ) : null}
