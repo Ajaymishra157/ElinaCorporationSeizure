@@ -1,13 +1,23 @@
 import SQLite from 'react-native-sqlite-storage';
+import RNFS from 'react-native-fs';
 
-export const db = SQLite.openDatabase({ name: 'VehicleDB.db', location: 'Documents' });
+SQLite.enablePromise(true);
+
+const DB_PATH = `${RNFS.DocumentDirectoryPath}/VehicleDB.db`;
+
+export const openDatabase = async () => {
+    return await SQLite.openDatabase({
+        name: DB_PATH,
+        location: 'default'
+    });
+};
 
 // Create table
 export const initDB = () => {
     db.transaction(tx => {
         // Create vehicles table if not exists
         tx.executeSql(
-            `CREATE TABLE IF NOT EXISTS vehicles (
+            `CREATE TABLE IF NOT EXISTS full_vehicle_detail (
                 id INTEGER PRIMARY KEY,
                 month TEXT,
                 finance_name TEXT,
@@ -43,7 +53,7 @@ export const initDB = () => {
 
         // 2️⃣ Check if customer_address column exists
         tx.executeSql(
-            `PRAGMA table_info(vehicles);`,
+            `PRAGMA table_info(full_vehicle_detail);`,
             [],
             (tx, results) => {
                 let exists = false;
@@ -56,7 +66,7 @@ export const initDB = () => {
                 // 3️⃣ Agar column nahi hai → ALTER TABLE add column
                 if (!exists) {
                     tx.executeSql(
-                        `ALTER TABLE vehicles ADD COLUMN customer_address TEXT;`,
+                        `ALTER TABLE full_vehicle_detail ADD COLUMN customer_address TEXT;`,
                         [],
                         () => console.log("✅ customer_address column added"),
                         (err) => console.log("❌ Error adding customer_address column:", err.message)
@@ -90,21 +100,21 @@ export const initDB = () => {
 
         // ✅ New indexes for last_* columns
         tx.executeSql(
-            "CREATE INDEX IF NOT EXISTS idx_reg_state ON vehicles(last_reg_no, state_code);",
+            "CREATE INDEX IF NOT EXISTS idx_reg_state ON full_vehicle_detail(last_reg_no, state_code);",
             [],
             () => console.log("✅ Composite index created on last_reg_no + state_code"),
             (error) => console.log("❌ Error creating composite index on reg/state:", error)
         );
 
         tx.executeSql(
-            "CREATE INDEX IF NOT EXISTS idx_chassis_state ON vehicles(last_chassis_no, state_code);",
+            "CREATE INDEX IF NOT EXISTS idx_chassis_state ON full_vehicle_detail(last_chassis_no, state_code);",
             [],
             () => console.log("✅ Composite index created on last_chassis_no + state_code"),
             (error) => console.log("❌ Error creating composite index on chassis/state:", error)
         );
 
         tx.executeSql(
-            "CREATE INDEX IF NOT EXISTS idx_engine_state ON vehicles(last_engine_no, state_code);",
+            "CREATE INDEX IF NOT EXISTS idx_engine_state ON full_vehicle_detail(last_engine_no, state_code);",
             [],
             () => console.log("✅ Composite index created on last_engine_no + state_code"),
             (error) => console.log("❌ Error creating composite index on engine/state:", error)
@@ -176,7 +186,7 @@ export const bulkInsertVehicles = async (vehicles) => {
                     });
 
                     const sql = `
-                        INSERT OR REPLACE INTO vehicles (
+                        INSERT OR REPLACE INTO full_vehicle_detail (
                             id, month, finance_name, finance_contact_person_name,
                             finance_contact_number, manager, branch, agreement_number, app_id,
                             customer_name, bucket, emi, principle_outstanding,
@@ -205,12 +215,12 @@ export const bulkInsertVehicles = async (vehicles) => {
         // await db.executeSql("CREATE INDEX IF NOT EXISTS idx_registration_number ON vehicles(registration_number)");
         // await db.executeSql("CREATE INDEX IF NOT EXISTS idx_chassis_no ON vehicles(chassis_no)");
         // await db.executeSql("CREATE INDEX IF NOT EXISTS idx_engine_no ON vehicles(engine_no)");
-        await db.executeSql("CREATE INDEX IF NOT EXISTS idx_reg_state ON vehicles(last_reg_no, state_code)");
-        await db.executeSql("CREATE INDEX IF NOT EXISTS idx_chassis_state ON vehicles(last_chassis_no, state_code)");
-        await db.executeSql("CREATE INDEX IF NOT EXISTS idx_engine_state ON vehicles(last_engine_no, state_code)");
+        await db.executeSql("CREATE INDEX IF NOT EXISTS idx_reg_state ON full_vehicle_detail(last_reg_no, state_code)");
+        await db.executeSql("CREATE INDEX IF NOT EXISTS idx_chassis_state ON full_vehicle_detail(last_chassis_no, state_code)");
+        await db.executeSql("CREATE INDEX IF NOT EXISTS idx_engine_state ON full_vehicle_detail(last_engine_no, state_code)");
 
         const end = Date.now();
-        console.log(`✅ Inserted ${total} vehicles in ${(end - start) / 1000} seconds`);
+        console.log(`✅ Inserted ${total} full_vehicle_detail in ${(end - start) / 1000} seconds`);
     } catch (error) {
         console.log("❌ Bulk insert failed:", error.message);
         throw error;
@@ -222,7 +232,7 @@ export const getVehiclesPaginated = (offset, limit) => {
     return new Promise((resolve, reject) => {
         db.transaction(tx => {
             tx.executeSql(
-                `SELECT * FROM vehicles LIMIT ? OFFSET ?`,
+                `SELECT * FROM full_vehicle_detail LIMIT ? OFFSET ?`,
                 [limit, offset],
                 (tx, results) => {
                     const rows = results.rows;
@@ -246,7 +256,7 @@ export const getAllVehicles = () => {
     return new Promise((resolve, reject) => {
         db.transaction(tx => {
             tx.executeSql(
-                `SELECT * FROM vehicles`,
+                `SELECT * FROM full_vehicle_detail`,
                 [],
                 (tx, results) => {
                     const rows = results.rows;

@@ -21,6 +21,10 @@ import LocationAndNetworkChecker from '../CommonFiles/LocationAndNetworkChecker'
 import RNExitApp from 'react-native-exit-app';
 import { Dropdown } from 'react-native-element-dropdown';
 import CustomSlider from '../CommonFiles/CustomSlider';
+import RNFS from 'react-native-fs';
+import { unzip } from 'react-native-zip-archive';
+import SQLite from 'react-native-sqlite-storage';
+import FastImage from 'react-native-fast-image';
 
 
 
@@ -100,11 +104,14 @@ const FirstScreen = () => {
   const [deletesyncstatus, setDeleteSyncstatus] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [dummydata, setDummydata] = useState(null);
+  const [isStoringData, setIsStoringData] = useState(false); // Track storing data state
+  const [planexpirymodal, setPlanExpiryModal] = useState(false);
 
   const hasSynced = useRef(false); // ye baar baar sync hone se bachayega
   const flatListRef = useRef(null);
   const [lastOffset, setLastOffset] = useState(null);
   const [hasPendingRecovery, setHasPendingRecovery] = useState(false);
+
 
   const [menuVisible, setMenuVisible] = useState(modalopen == 'open' ? true : false);
 
@@ -309,18 +316,18 @@ const FirstScreen = () => {
         db.transaction(tx => {
           // Step 1: Count how many vehicles actually exist in this range
           tx.executeSql(
-            `SELECT COUNT(*) as count FROM vehicles WHERE id BETWEEN ? AND ?`,
+            `SELECT COUNT(*) as count FROM full_vehicle_detail WHERE id BETWEEN ? AND ?`,
             [start, end],
             (_, result) => {
               const countInRange = result.rows.item(0).count;
 
               // Step 2: Delete vehicles in this range
               tx.executeSql(
-                `DELETE FROM vehicles WHERE id BETWEEN ? AND ?`,
+                `DELETE FROM full_vehicle_detail WHERE id BETWEEN ? AND ?`,
                 [start, end],
                 () => {
                   totalDeleted += countInRange;
-                  console.log(`🗑 Deleted vehicles ${start}–${end} (deleted: ${countInRange}, total deleted: ${totalDeleted})`);
+                  console.log(`🗑 Deleted full_vehicle_detail ${start}–${end} (deleted: ${countInRange}, total deleted: ${totalDeleted})`);
                   resolve();
                 },
                 (_, error) => {
@@ -330,7 +337,7 @@ const FirstScreen = () => {
               );
             },
             (_, error) => {
-              console.log("❌ Error counting vehicles in range:", error.message);
+              console.log("❌ Error counting full_vehicle_detail in range:", error.message);
               reject(error);
             }
           );
@@ -365,7 +372,7 @@ const FirstScreen = () => {
       // 👉 Case 1: Manual Sync after login
       if (shouldSync && !hasSynced.current && days !== 0) {
         console.log("🚀 Sync triggered after login");
-        loadAllVehiclesPaginated(true, 'no'); // manual
+        syncDataFromFile();
         hasSynced.current = true;
         return;
       }
@@ -455,6 +462,10 @@ const FirstScreen = () => {
   };
 
   const [allVehicles, setAllVehicles] = useState([]);
+  const [loadingDone, setLoadingDone] = useState(true);
+  const [syncMessageTitle, setSyncMessageTitle] = useState("");  // big text
+  const [syncMessage, setSyncMessage] = useState("");            // small text
+  const [showButtons, setShowButtons] = useState(true);
 
   const [dropdownData] = useState([
 
@@ -652,7 +663,7 @@ const FirstScreen = () => {
     setIsDropdownVisible(false);
   };
 
-  const [loadingDone, setLoadingDone] = useState(true);
+
 
   const UserWiseExpiryApi = async () => {
     const userId = await AsyncStorage.getItem('staff_id');
@@ -775,7 +786,7 @@ const FirstScreen = () => {
     return new Promise((resolve, reject) => {
       db.transaction(tx => {
         tx.executeSql(
-          'SELECT COUNT(*) as count FROM vehicles',
+          'SELECT COUNT(*) as count FROM full_vehicle_detail',
           [],
           (tx, results) => {
             const count = results.rows.item(0).count;
@@ -790,7 +801,7 @@ const FirstScreen = () => {
     });
   };
 
-  const loadAllVehiclesPaginated = async (isManual = false, alldataget) => {
+  const loadAllfull_vehicle_detailPaginated = async (isManual = false, alldataget) => {
 
     await AsyncStorage.setItem("syncStatus", "incomplete");
     KeepAwake.activate();
@@ -884,7 +895,7 @@ const FirstScreen = () => {
 
             countVehiclesInDB();
 
-            console.log(`✅ Bulk inserted ${cleanedList.length} vehicles`);
+            console.log(`✅ Bulk inserted ${cleanedList.length} full_vehicle_detail`);
 
           } catch (bulkErr) {
             console.log(`❌ Bulk insert failed: ${bulkErr.message}`);
@@ -926,15 +937,258 @@ const FirstScreen = () => {
   const countVehiclesInDB = () => {
     db.transaction(tx => {
       tx.executeSql(
-        'SELECT COUNT(*) AS count FROM vehicles',
+        'SELECT COUNT(*) AS count FROM full_vehicle_detail',
         [],
         (tx, results) => {
           const total = results.rows.item(0).count;
-          console.log("📊 DB total vehicles count:", total);
+          console.log("📊 DB total full_vehicle_detail count:", total);
           setTotalItems(total);  // <- THIS IS KEY
         }
       );
     });
+  };
+
+
+  const INTERNAL_DB_PATH = `${RNFS.DocumentDirectoryPath}/VehicleDB.db`;
+  const INTERNAL_EXTRACT_PATH = `${RNFS.DocumentDirectoryPath}/dbfile`;
+
+  // 🔒 Force close DB before deleting file
+  const closeExistingDB = async () => {
+    try {
+      const db = await SQLite.openDatabase({ name: INTERNAL_DB_PATH, location: 'default', readOnly: true });
+      await db.close();
+      console.log("🔒 Database closed successfully");
+    } catch (e) {
+      console.log("⚠️ Database was not open or already closed:", e.message);
+    }
+  };
+
+  const syncDataFromFile = async () => {
+    KeepAwake.activate();
+    try {
+      // setDownloadLoading(true);
+      // setSyncPhase("downloading");
+      setLoadingDone(false);
+      setProgressPercent(0);
+
+      const zipUrl = `https://admin.elinacorporation.in/sqlite/full_vehicle_detail.zip?v=${Date.now()}`;
+      const zipPath = `${RNFS.DocumentDirectoryPath}/full_vehicle_detail.zip`;
+      const extractPath = INTERNAL_EXTRACT_PATH;
+      const deviceDBPath = INTERNAL_DB_PATH;
+
+      // ===== Delete old ZIP =====
+      console.log("Checking if old zip exists at:", zipPath);
+      if (await RNFS.exists(zipPath)) {
+        await RNFS.unlink(zipPath);
+        console.log("🗑️ Old zip file deleted");
+      }
+
+      // ===== Delete extracted folder =====
+      console.log("Checking if extracted folder exists:", extractPath);
+      if (await RNFS.exists(extractPath)) {
+        try {
+          await RNFS.unlink(extractPath);
+          console.log("🗑️ Old extracted folder deleted");
+        } catch (err) {
+          console.log("⚠️ Failed to delete extracted folder:", err.message);
+        }
+      }
+
+      // ===== Delete old DB (THIS WAS FAILING EARLIER) =====
+      console.log("Checking if old DB exists at:", deviceDBPath);
+      if (await RNFS.exists(deviceDBPath)) {
+        console.log("🔒 Closing DB before deletion...");
+        await closeExistingDB();
+
+        // Wait for OS to release file lock
+        await new Promise(r => setTimeout(r, 500));
+
+        await RNFS.unlink(deviceDBPath);
+        console.log("🗑️ Old VehicleDB.db deleted from internal storage");
+      }
+
+      await AsyncStorage.removeItem("totalVehicleCount");
+
+      // ===== Create extract folder again =====
+      if (!(await RNFS.exists(extractPath))) {
+        await RNFS.mkdir(extractPath);
+        console.log("✅ Created extract folder:", extractPath);
+      }
+
+      // ===== Download ZIP =====
+      console.log("📥 Downloading from:", zipUrl);
+
+      // ✅ Download with progress tracking
+      const download = RNFS.downloadFile({
+        fromUrl: zipUrl,
+        toFile: zipPath,
+        progressDivider: 1, // triggers every 1% progress
+        begin: (res) => {
+          console.log("🚀 Download started...");
+          // setSyncPhase("downloading");
+          setProgressPercent(0);
+        },
+        progress: (res) => {
+          const percent = Math.floor((res.bytesWritten / res.contentLength) * 100);
+          setProgressPercent(percent);
+        },
+      });
+
+      const res = await download.promise;
+      if (res.statusCode != 200) throw new Error(`Download failed (${res.statusCode})`);
+      console.log("✅ ZIP downloaded:", zipPath);
+
+      const zipStat = await RNFS.stat(zipPath);
+      console.log("📦 ZIP file size (bytes):", zipStat.size);
+      console.log("📦 ZIP file size (MB):", (zipStat.size / (1024 * 1024)).toFixed(2), "MB");
+
+      // 🔹 Show small wait indicator while extracting
+      // setSyncPhase("extracting");
+      setIsStoringData(true);
+      setSyncMessageTitle("Extracting Files...");
+      setSyncMessage("Unzipping database...");
+
+      // Unzip SQLite file
+      await unzip(zipPath, extractPath);
+      console.log("✅ Unzipped to:", extractPath);
+      setSyncMessage("Searching extracted database file...");
+
+      // Delete old DB if exists in internal storage
+      if (await RNFS.exists(deviceDBPath)) {
+        await RNFS.unlink(deviceDBPath);
+        console.log("🧹 Old DB deleted from internal storage");
+      }
+
+      // Move the SQLite file to internal storage
+      const files = await RNFS.readDir(extractPath);
+
+      if (files.length === 0) {
+        throw new Error("Extracted folder empty!");
+      }
+
+      console.log("📂 Extracted files:", files.map(f => f.name));
+
+      const sqliteFile = files.find(
+        f => f.name.endsWith('.sqlite') || f.name.endsWith('.db')
+      );
+
+      if (!sqliteFile) {
+        throw new Error("No database file (.sqlite or .db) found in extracted folder");
+      }
+
+      if (!sqliteFile) {
+        throw new Error("No .sqlite file found in extracted folder");
+      }
+
+      const extractedDBPath = sqliteFile.path;
+      setSyncMessageTitle("Copying Database...");
+      setSyncMessage("Moving database to internal storage...");
+      await RNFS.moveFile(extractedDBPath, deviceDBPath);
+      console.log("✅ DB moved to internal storage:", deviceDBPath);
+
+      // await AsyncStorage.removeItem("totalVehicleCount");
+
+      // Open DB using Promise style from internal storage
+      setSyncMessageTitle("Opening Database...");
+      setSyncMessage("Initializing database...");
+      const db = await SQLite.openDatabase({ name: deviceDBPath, location: 'default' });
+      console.log("✅ Database opened successfully from internal storage");
+
+      console.log("⚡ Creating indexes…");
+      setSyncMessageTitle("Optimizing Database...");
+      setSyncMessage("Creating indexes for fast search...");
+      await db.executeSql(`
+        CREATE INDEX IF NOT EXISTS idx_reg_last_state_status 
+        ON full_vehicle_detail (reg_last, state_code, vehicle_status);
+      `);
+
+      await db.executeSql(`
+        CREATE INDEX IF NOT EXISTS idx_chassis_last_state_status 
+        ON full_vehicle_detail (chassis_last, state_code, vehicle_status);
+      `);
+
+      await db.executeSql(`
+        CREATE INDEX IF NOT EXISTS idx_eng_last_state_status 
+        ON full_vehicle_detail (eng_last, state_code, vehicle_status);
+      `);
+
+      await db.executeSql(`
+        CREATE INDEX IF NOT EXISTS idx_finance_name 
+        ON full_vehicle_detail (vehicle_finance_name);
+      `);
+
+      await db.executeSql("PRAGMA analysis_limit=4000;");
+      await db.executeSql("PRAGMA optimize;");
+      console.log("⚡ Indexes created");
+
+      setSyncMessageTitle("Finalizing...");
+      setSyncMessage("Counting records...");
+
+      const [result] = await db.executeSql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='full_vehicle_detail';"
+      );
+
+      if (result.rows.length == 0) {
+        console.log("❌ Table 'full_vehicle_detail' not found!");
+        Alert.alert("Error", "Try Again after some time.");
+      } else {
+        const [countResult] = await db.executeSql(
+          "SELECT COUNT(*) as total FROM full_vehicle_detail"
+        );
+        const total = countResult.rows.item(0).total;
+        console.log("📊 Total rows:", total);
+        // Alert.alert("✅ Sync Complete", `Imported ${total} rows from file`);
+        setTotalItems(total);
+        await AsyncStorage.setItem("totalVehicleCount", String(total));
+      }
+
+      // Optional: scan file on Android to make it visible
+      if (Platform.OS == 'android') {
+        await RNFS.scanFile(deviceDBPath);
+      }
+
+      // ✅ Done
+      // setSyncPhase("completed");
+      setProgressPercent(100);
+      await Updatesyncstatus();
+
+    } catch (error) {
+      console.log("❌ Sync failed:", error.message);
+      Alert.alert("Error", "Failed to sync data from file");
+      // setSyncPhase("error");
+    } finally {
+      // setDownloadLoading(false);
+      setLoadingDone(true);
+      setIsStoringData(false)
+      KeepAwake.deactivate();
+    }
+  };
+
+  const Updatesyncstatus = async () => {
+    const userId = await AsyncStorage.getItem('staff_id');
+    if (!userId) {
+      console.log("❌ User ID not found");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${ENDPOINTS.update_sync_status}?staff_id=${userId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const result = await response.json();
+
+      if (result.code == 200) {
+        UserWiseExpiryApi();
+      } else {
+        console.log('❌ Error: Failed ');
+      }
+    } catch (error) {
+      console.log('❌ Error checking for update sync time:', error.message);
+    }
   };
 
   const loadAllFromDB = async () => {
@@ -982,11 +1236,11 @@ const FirstScreen = () => {
       setIsDeleting(true);
       await loadDeletedVehiclesPaginated();
       setIsDeleting(false);
-      await loadAllVehiclesPaginated(0, 'no'); // always reset offset
+      await syncDataFromFile();
     }
     else if (SyncStatus === "Yes") {
       console.log("🚀 SyncStatus=Yes & DeleteSync=No → Run full sync only");
-      await loadAllVehiclesPaginated(0, 'no');
+      await syncDataFromFile();
     }
     else {
       console.log("🚀 SyncStatus=No & DeleteSync=No → Nothing to sync");
@@ -1170,10 +1424,7 @@ const FirstScreen = () => {
   //   });
   // };
 
-
-
   const handleSearch = async (query) => {
-
     if (!isAppAvailable) {
       ToastAndroid.show(appStatusMessage, ToastAndroid.LONG);
       setSearchVehicle([]);
@@ -1208,7 +1459,7 @@ const FirstScreen = () => {
     const baseSelect = `
       SELECT id, registration_number, chassis_number, engine_number,
              type, product, state_code, last_reg_no, last_chassis_no, last_engine_no
-      FROM vehicles
+      FROM full_vehicle_detail
   `;
 
     // Build SQL based on search type
@@ -1237,18 +1488,8 @@ const FirstScreen = () => {
       params.push(SelectedState);
     }
 
-    // ⭐ GJ TOP SORTING
-    sql += `
- ORDER BY 
-  CASE 
-    WHEN state_code = 'GJ' THEN 0 
-    WHEN state_code = 'MH' THEN 1 
-    WHEN state_code = 'MP' THEN 2 
-    WHEN state_code = 'RJ' THEN 3 
-    ELSE 4 
-  END,
-  last_reg_no ASC
-  `;
+    // ⭐ REMOVE CUSTOM ORDER BY - Let JavaScript handle sorting
+    sql += ` ORDER BY registration_number COLLATE NOCASE`;
 
     console.log("📘 FINAL SQL:", sql);
     console.log("📗 PARAMS:", params);
@@ -1264,8 +1505,6 @@ const FirstScreen = () => {
           for (let i = 0; i < results.rows.length; i++) {
             const row = results.rows.item(i);
 
-            console.log("🟦 Row State:", row.state_code); // DEBUG
-
             let key = "";
             if (scheduleType === "Reg No") key = row.registration_number;
             if (scheduleType === "Chassis No") key = row.chassis_number;
@@ -1278,8 +1517,42 @@ const FirstScreen = () => {
             }
           }
 
-          const finalList = Array.from(uniqueMap.values());
-          console.log("🔍 Final rows:", finalList.length);
+          let finalList = Array.from(uniqueMap.values());
+
+          // ⭐ APPLY CUSTOM SORTING: GJ First + Priority States + Natural Sort
+          finalList.sort((a, b) => {
+            // Define priority order
+            const priorityOrder = {
+              'GJ': 1,
+              'MH': 2,
+              'MP': 3,
+              'RJ': 4
+            };
+
+            const aPriority = priorityOrder[a.state_code] || 5;
+            const bPriority = priorityOrder[b.state_code] || 5;
+
+            // First sort by priority
+            if (aPriority !== bPriority) {
+              return aPriority - bPriority;
+            }
+
+            // Same priority state - apply natural sort
+            let aField, bField;
+
+            if (scheduleType === "Reg No") {
+              aField = a.registration_number || '';
+              bField = b.registration_number || '';
+            } else if (scheduleType === "Chassis No") {
+              aField = a.chassis_number || '';
+              bField = b.chassis_number || '';
+            } else if (scheduleType === "Engine No") {
+              aField = a.engine_number || '';
+              bField = b.engine_number || '';
+            }
+
+            return naturalSort(aField, bField);
+          });
 
           setSearchVehicle(finalList);
           setSearchPerformed(true);
@@ -1296,6 +1569,156 @@ const FirstScreen = () => {
       );
     });
   };
+
+  // ✅ Natural Sort Function 
+  const naturalSort = (a, b) => {
+    const ax = [], bx = [];
+
+    a.replace(/(\d+)|(\D+)/g, function (_, $1, $2) {
+      ax.push([$1 || Infinity, $2 || ""]);
+    });
+
+    b.replace(/(\d+)|(\D+)/g, function (_, $1, $2) {
+      bx.push([$1 || Infinity, $2 || ""]);
+    });
+
+    while (ax.length && bx.length) {
+      const an = ax.shift();
+      const bn = bx.shift();
+      const nn = (an[0] - bn[0]) || an[1].localeCompare(bn[1]);
+      if (nn) return nn;
+    }
+
+    return ax.length - bx.length;
+  };
+
+
+  // main code ok
+
+  //   const handleSearch = async (query) => {
+
+  //     if (!isAppAvailable) {
+  //       ToastAndroid.show(appStatusMessage, ToastAndroid.LONG);
+  //       setSearchVehicle([]);
+  //       setSearchPerformed(false);
+  //       return;
+  //     }
+
+  //     if (!query) {
+  //       setSearchVehicle([]);
+  //       setSearchLoading(false);
+  //       return;
+  //     }
+
+  //     setSearchQuery('');
+  //     const userType = await AsyncStorage.getItem('user_type');
+
+  //     let sql = "";
+  //     let params = [];
+
+  //     // Helper → prefix range
+  //     const makeRange = (prefix) => {
+  //       if (!prefix) return ['', ''];
+  //       const last = prefix.slice(-1);
+  //       const next = String.fromCharCode(last.charCodeAt(0) + 1);
+  //       return [prefix, prefix.slice(0, -1) + next];
+  //     };
+
+  //     const prefix = query.toUpperCase();
+  //     const range = makeRange(prefix);
+
+  //     // ⭐ Always select state_code also
+  //     const baseSelect = `
+  //       SELECT id, registration_number, chassis_number, engine_number,
+  //              type, product, state_code, last_reg_no, last_chassis_no, last_engine_no
+  //       FROM vehicles
+  //   `;
+
+  //     // Build SQL based on search type
+  //     if (scheduleType === "Reg No") {
+  //       sql = `${baseSelect}
+  //            WHERE last_reg_no >= ? AND last_reg_no < ?
+  //            AND state_code != 'All'`;
+  //       params = range;
+  //     }
+  //     else if (scheduleType === "Chassis No") {
+  //       sql = `${baseSelect}
+  //            WHERE last_chassis_no >= ? AND last_chassis_no < ?
+  //            AND state_code != 'All'`;
+  //       params = range;
+  //     }
+  //     else if (scheduleType === "Engine No") {
+  //       sql = `${baseSelect}
+  //            WHERE last_engine_no >= ? AND last_engine_no < ?
+  //            AND state_code != 'All'`;
+  //       params = range;
+  //     }
+
+  //     // Optional selected state
+  //     if (SelectedState !== "All") {
+  //       sql += " AND state_code = ?";
+  //       params.push(SelectedState);
+  //     }
+
+  //     // ⭐ GJ TOP SORTING
+  //     sql += `
+  //  ORDER BY 
+  //   CASE 
+  //     WHEN state_code = 'GJ' THEN 0 
+  //     WHEN state_code = 'MH' THEN 1 
+  //     WHEN state_code = 'MP' THEN 2 
+  //     WHEN state_code = 'RJ' THEN 3 
+  //     ELSE 4 
+  //   END,
+  //   last_reg_no ASC
+  //   `;
+
+  //     console.log("📘 FINAL SQL:", sql);
+  //     console.log("📗 PARAMS:", params);
+
+  //     db.transaction((tx) => {
+  //       tx.executeSql(
+  //         sql,
+  //         params,
+  //         (tx, results) => {
+
+  //           const uniqueMap = new Map();
+
+  //           for (let i = 0; i < results.rows.length; i++) {
+  //             const row = results.rows.item(i);
+
+  //             console.log("🟦 Row State:", row.state_code); // DEBUG
+
+  //             let key = "";
+  //             if (scheduleType === "Reg No") key = row.registration_number;
+  //             if (scheduleType === "Chassis No") key = row.chassis_number;
+  //             if (scheduleType === "Engine No") key = row.engine_number;
+
+  //             if (userType === "normal") {
+  //               if (!uniqueMap.has(key)) uniqueMap.set(key, row);
+  //             } else {
+  //               uniqueMap.set(`${key}_${row.id}`, row);
+  //             }
+  //           }
+
+  //           const finalList = Array.from(uniqueMap.values());
+  //           console.log("🔍 Final rows:", finalList.length);
+
+  //           setSearchVehicle(finalList);
+  //           setSearchPerformed(true);
+  //           setSearchLoading(false);
+
+  //           if (flatListRef.current) {
+  //             flatListRef.current.scrollToOffset({ animated: false, offset: 0 });
+  //           }
+  //         },
+  //         (tx, err) => {
+  //           console.log("❌ SQL Error:", err);
+  //           setSearchLoading(false);
+  //         }
+  //       );
+  //     });
+  //   };
 
 
   function formatIndianNumber(num) {
@@ -2196,6 +2619,13 @@ const FirstScreen = () => {
                     //     })
                     // }
                     data={SearchVehicle}
+
+                    // data={
+                    //   listType === "Grid"
+                    //     ? transformToColumnWise([...SearchVehicle].sort(naturalSort))
+                    //     : [...SearchVehicle].sort(naturalSort)
+                    // }
+
                     extraData={SearchVehicle}
                     keyExtractor={(item) => item.id.toString()}
                     renderItem={listType === 'Grid' ? renderGridItem : renderItem}
@@ -2267,7 +2697,7 @@ const FirstScreen = () => {
                   onPress={() => {
                     KeepAwake.activate();
                     console.log("⏬ User triggered crash recovery sync");
-                    loadAllVehiclesPaginated(false, 'yes');
+                    syncDataFromFile();
                     hasSynced.current = true;
                     setHasPendingRecovery(false); // hide button after sync starts
                   }} >
@@ -2376,34 +2806,48 @@ const FirstScreen = () => {
               backgroundColor: '#00000070'
             }}>
               <View style={{
-                width: 320, height: 150, backgroundColor: 'white',
+                width: 320, height: 200, backgroundColor: 'white',
                 borderRadius: 20, justifyContent: 'center', alignItems: 'center',
                 shadowColor: "#000", shadowOffset: { width: 0, height: 10 },
                 shadowOpacity: 0.25, shadowRadius: 3.5, elevation: 5,
                 padding: 20,
               }}>
 
-                {isDeleting &&
+                {(isDeleting || isStoringData) &&
                   <View style={{ alignItems: 'center' }}>
                     <ActivityIndicator color={'#022e29'} size='large' />
                   </View>
                 }
+                {(!isDeleting && !isStoringData) &&
+
+                  <FastImage
+                    source={require('../assets/animations/loader.gif')} // 👈 update path accordingly
+                    style={{
+                      width: 50,
+                      height: 50,
+                      marginBottom: 10,
+                      alignSelf: 'center',
+                    }}
+                    resizeMode='contain'
+                  />}
 
                 <Text style={{
                   marginTop: 10, fontFamily: 'Inter-Bold', color: 'black',
                   fontSize: 18, textAlign: 'center',
                 }}>
-                  {isDeleting ? 'We Are Deleting Records...' : 'Downloading Data...'}
+                  {isDeleting ? 'Please wait, we are fetching records from server...' : isStoringData ? syncMessageTitle || "Processing Data..." : 'Downloading Data...'}
                 </Text>
 
-                {!isDeleting &&
+                {isStoringData ? <Text style={{ fontSize: 14, color: '#555', textAlign: 'center', marginTop: 8, fontFamily: 'Inter-Regular', }}>{syncMessage || "Please wait..."}</Text> : null}
+
+                {(!isDeleting && !isStoringData) &&
                   <>
                     <Progress.Bar
                       progress={progressPercent / 100} // 0.0 to 1.0
                       width={280}
                       height={10}
                       borderRadius={5}
-                      color="#050505ff"
+                      color="#29030b"
                       style={{ marginTop: 15 }}
                     />
 
@@ -2416,6 +2860,14 @@ const FirstScreen = () => {
                       {progressPercent}% Completed
                     </Text>
                   </>}
+
+                {/* {isStoringData ? (
+                    <View style={{ alignItems: 'center' }}>
+                      <ActivityIndicator size="large" color={'#a0522d'} style={{ marginBottom: 15 }} />
+                      <Text style={{ marginTop: 10, fontFamily: 'Inter-Bold', color: 'black', fontSize: 18, textAlign: 'center', }}>Storing Data...</Text>
+                      <Text style={{ marginTop: 10, fontFamily: 'Inter-Bold', color: 'black', fontSize: 14, textAlign: 'center', }}>Please wait while storing data</Text>
+                    </View>
+                  ) : null} */}
               </View>
             </View>
           </Modal>

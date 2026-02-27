@@ -1,4 +1,4 @@
-import { View, Text, TouchableOpacity, NativeModules, Platform, StyleSheet, ActivityIndicator, BackHandler } from 'react-native'
+import { View, Text, TouchableOpacity, NativeModules, Platform, StyleSheet, ActivityIndicator, BackHandler, Alert } from 'react-native'
 import React, { useState, useEffect } from 'react'
 import colors from '../CommonFiles/Colors'
 import Ionicons from 'react-native-vector-icons/Ionicons';
@@ -8,6 +8,10 @@ import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityI
 import { ENDPOINTS } from '../CommonFiles/Constant';
 import { db, bulkInsertVehicles } from '../utils/db';
 import * as Progress from 'react-native-progress';
+import FastImage from 'react-native-fast-image';
+import RNFS from 'react-native-fs';
+import { unzip } from 'react-native-zip-archive';
+import SQLite from 'react-native-sqlite-storage';
 
 const { ForegroundService } = NativeModules;
 
@@ -17,6 +21,185 @@ const Downloaddata = ({ navigation }) => {
     const [progressPercent, setProgressPercent] = useState(0);
     const [totalItems, setTotalItems] = useState(0);
     const [vehiclecount, setVehiclecount] = useState(null);
+
+
+    const INTERNAL_DB_PATH = `${RNFS.DocumentDirectoryPath}/VehicleDB.db`;
+    const INTERNAL_EXTRACT_PATH = `${RNFS.DocumentDirectoryPath}/dbfile`;
+
+    // 🔹 Sync data from file (modified for internal storage)
+    const syncDataFromFile = async () => {
+        const userId = await AsyncStorage.getItem('staff_id');
+
+        KeepAwake.activate();
+        try {
+            // setDownloadLoading(true);
+            setProgressPercent(0);
+
+            if (userId == "43" || userId == "14" || userId == "45") {
+                // Skip delays for these user IDs
+                console.log("⏳ Skipping delays for userId:", userId);
+                setSyncStatus("downloading"); // Directly set to downloading
+            } else {
+                // Apply delay for other users
+                console.log("⏳ Waiting 30 seconds before starting download...");
+                setSyncStatus("deleting"); // Show "fetching records" initially
+                await new Promise(resolve => setTimeout(resolve, 30000)); // 30 seconds delay
+                setSyncStatus("downloading");
+            }
+
+            const zipUrl = `https://admin.elinacorporation.in/sqlite/full_vehicle_detail.zip?v=${Date.now()}`;
+            const zipPath = `${RNFS.DocumentDirectoryPath}/full_vehicle_detail.zip`;
+            const extractPath = INTERNAL_EXTRACT_PATH;
+            const deviceDBPath = INTERNAL_DB_PATH;
+
+            // 1️⃣ Delete old ZIP file if exists
+            if (await RNFS.exists(zipPath)) {
+                await RNFS.unlink(zipPath);
+                console.log("🗑️ Old zip file deleted");
+            }
+
+            // 2️⃣ Delete extracted folder (dbfile)
+            if (await RNFS.exists(extractPath)) {
+                await RNFS.unlink(extractPath);
+                console.log("🗑️ Old extracted folder deleted");
+            }
+
+            // 3️⃣ Delete previous DB file in internal storage
+            if (await RNFS.exists(deviceDBPath)) {
+                await RNFS.unlink(deviceDBPath);
+                console.log("🗑️ Old VehicleDB.db deleted from internal storage");
+            }
+
+            // 4️⃣ Ensure extract folder exists in internal storage
+            if (!(await RNFS.exists(extractPath))) await RNFS.mkdir(extractPath);
+
+            console.log("📥 Downloading from:", zipUrl);
+
+            // ✅ Download with progress tracking
+            const download = RNFS.downloadFile({
+                fromUrl: zipUrl,
+                toFile: zipPath,
+                progressDivider: 1, // triggers every 5% progress
+                begin: (res) => {
+                    console.log("🚀 Download started...");
+                    setSyncStatus("downloading");
+                    setProgressPercent(0);
+                },
+                progress: (res) => {
+                    const percent = Math.floor((res.bytesWritten / res.contentLength) * 100);
+                    setProgressPercent(percent);
+                },
+            });
+
+            const res = await download.promise;
+            if (res.statusCode != 200) throw new Error(`Download failed (${res.statusCode})`);
+            console.log("✅ ZIP downloaded:", zipPath);
+
+            // 🔹 Show small wait indicator while extracting
+            setSyncStatus("extracting");
+            if (userId != "43" && userId != "14" && userId != "45") {
+                // Apply 20-second delay for non-specified userIds
+                console.log("⏳ Waiting 20 seconds before extraction...");
+                await new Promise(resolve => setTimeout(resolve, 20000)); // 20 seconds delay
+            }
+            // Unzip SQLite file
+            await unzip(zipPath, extractPath);
+            console.log("✅ Unzipped to:", extractPath);
+
+            // Delete old DB if exists in internal storage
+            if (await RNFS.exists(deviceDBPath)) {
+                await RNFS.unlink(deviceDBPath);
+                console.log("🧹 Old DB deleted from internal storage");
+            }
+
+            // Move the SQLite file to internal storage
+            const files = await RNFS.readDir(extractPath);
+            const sqliteFile = files.find(f => f.name.endsWith('.sqlite'));
+
+            if (!sqliteFile) {
+                throw new Error("No .sqlite file found in extracted folder");
+            }
+
+            const extractedDBPath = sqliteFile.path;
+            await RNFS.moveFile(extractedDBPath, deviceDBPath);
+            console.log("✅ DB moved to internal storage:", deviceDBPath);
+
+            await AsyncStorage.removeItem("totalVehicleCount");
+            // Open DB using Promise style from internal storage
+            const db = await SQLite.openDatabase({ name: deviceDBPath, location: 'default' });
+            console.log("✅ Database opened successfully from internal storage");
+
+            try {
+                await prepareDB();
+                console.log("⚡ Indexes re-applied after sync for faster search");
+            } catch (err) {
+                console.log("⚠️ Failed to rebuild indexes:", err.message);
+            }
+
+            // Check table exists
+            const [result] = await db.executeSql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='full_vehicle_detail';"
+            );
+
+            if (result.rows.length == 0) {
+                console.log("❌ Table 'full_vehicle_detail' not found!");
+                Alert.alert("Error", "Try Again after some time.");
+            } else {
+                const [countResult] = await db.executeSql(
+                    "SELECT COUNT(*) as total FROM full_vehicle_detail"
+                );
+                const total = countResult.rows.item(0).total;
+                console.log("📊 Total rows:", total);
+                // Alert.alert("✅ Sync Complete", `Imported ${total} rows from file`);
+                setTotalItems(total);
+                await AsyncStorage.setItem("totalVehicleCount", String(total));
+            }
+
+            // Optional: scan file on Android to make it visible
+            if (Platform.OS == 'android') {
+                await RNFS.scanFile(deviceDBPath);
+            }
+
+            // ✅ Done
+            setSyncStatus("completed");
+            setProgressPercent(100);
+            await Updatesyncstatus();
+        } catch (error) {
+            console.log("❌ Sync failed:", error.message);
+            Alert.alert("Error", "Failed to sync data from file");
+            setSyncStatus("error");
+        } finally {
+            // setDownloadLoading(false);
+            KeepAwake.deactivate();
+        }
+    };
+
+    const Updatesyncstatus = async () => {
+        const userId = await AsyncStorage.getItem('staff_id');
+        if (!userId) {
+            console.log("❌ User ID not found");
+            return;
+        }
+
+        try {
+            const response = await fetch(`${ENDPOINTS.update_sync_status}?staff_id=${userId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            const result = await response.json();
+
+            if (result.code == 200) {
+                console.log('success');
+            } else {
+                console.log('❌ Error: Failed ');
+            }
+        } catch (error) {
+            console.log('❌ Error checking for update sync time:', error.message);
+        }
+    };
 
     // Make sure countVehiclesInDB returns a promise with the count
     const countVehiclesInDB = () => {
@@ -322,9 +505,9 @@ const Downloaddata = ({ navigation }) => {
         }
     };
 
-    const handleDownload = () => {
-        loadAllVehiclesPaginated(true, 'yes');
-    };
+    // const handleDownload = () => {
+    //     loadAllVehiclesPaginated(true, 'yes');
+    // };
 
     // Check for update when component mounts
     useEffect(() => {
@@ -336,7 +519,7 @@ const Downloaddata = ({ navigation }) => {
             case 'checking':
                 return (
                     <View style={styles.infoBox}>
-                        <MaterialCommunityIcons name="sync" size={40} color={colors.light_brown} style={{ marginBottom: 10 }} />
+                        <MaterialCommunityIcons name="sync" size={40} color="#2563EB" style={{ marginBottom: 10 }} />
                         <Text style={styles.title}>Checking for update...</Text>
                         <ActivityIndicator size="large" color={colors.Brown} style={{ marginTop: 20 }} />
                     </View>
@@ -349,7 +532,8 @@ const Downloaddata = ({ navigation }) => {
                         <Text style={styles.title}>Data update is available for download.</Text>
                         <TouchableOpacity
                             style={[styles.button, loading && { backgroundColor: "#999" }]}
-                            onPress={handleDownload}
+                            // onPress={handleDownload}
+                            onPress={syncDataFromFile}
                             disabled={loading}
                         >
                             {loading ? (
@@ -364,10 +548,28 @@ const Downloaddata = ({ navigation }) => {
                     </View>
                 );
 
+            case 'deleting':
+                return (
+                    <View style={styles.infoBox}>
+                        <ActivityIndicator size="large" color={colors.Brown} />
+                        <Text style={styles.subtitle}>Please wait, we are fetching records from server...</Text>
+                    </View>
+                );
+
             case 'downloading':
                 return (
                     <View style={styles.infoBox}>
-                        <MaterialCommunityIcons name="download" size={40} color={colors.light_brown} style={{ marginBottom: 10 }} />
+                        {/* <MaterialCommunityIcons name="download" size={40} color="#2563EB" style={{ marginBottom: 10 }} /> */}
+                        <FastImage
+                            source={require('../assets/animations/loader.gif')} // 👈 update path accordingly
+                            style={{
+                                width: 70,
+                                height: 70,
+                                marginBottom: 10,
+                                alignSelf: 'center',
+                            }}
+                            resizeMode='contain'
+                        />
                         <Text style={styles.title}>Please wait until download completes.</Text>
 
                         {/* Progress Bar */}
@@ -377,7 +579,7 @@ const Downloaddata = ({ navigation }) => {
                                 width={280}
                                 height={10}
                                 borderRadius={5}
-                                color="#050505ff"
+                                color="#29030b"
                                 style={{ marginTop: 15 }}
                             />
 
@@ -390,21 +592,64 @@ const Downloaddata = ({ navigation }) => {
                                 {progressPercent}% Completed
                             </Text>
                         </View>
-                        {/* <View style={styles.statsContainer}>
-                            <Text style={styles.statsText}>
-                                Downloaded Records: {totalItems}
-                            </Text>
-                        </View> */}
                     </View>
+                );
+
+            case 'extracting':
+                return (
+                    <View style={styles.infoBox}>
+                        <ActivityIndicator size="large" color={colors.Brown} style={{ marginBottom: 15 }} />
+                        <Text style={styles.title}>Storing Data...</Text>
+                        <Text style={styles.subtitle}>Please wait while storing data</Text>
+                    </View>
+                    // <View style={styles.infoBox}>
+                    //     {/* <MaterialCommunityIcons name="download" size={40} color="#2563EB" style={{ marginBottom: 10 }} /> */}
+                    //     <FastImage
+                    //         source={require('../assets/animations/loader.gif')} // 👈 update path accordingly
+                    //         style={{
+                    //             width: 70,
+                    //             height: 70,
+                    //             marginBottom: 10,
+                    //             alignSelf: 'center',
+                    //         }}
+                    //         resizeMode='contain'
+                    //     />
+                    //     <Text style={styles.title}>Please wait until download completes.</Text>
+
+                    //     {/* Progress Bar */}
+                    //     <View style={styles.progressContainer}>
+                    //         <Progress.Bar
+                    //             progress={progressPercent / 100} // 0.0 to 1.0
+                    //             width={280}
+                    //             height={10}
+                    //             borderRadius={5}
+                    //             color="#29030b"
+                    //             style={{ marginTop: 15 }}
+                    //         />
+
+                    //         <Text style={{
+                    //             marginTop: 5,
+                    //             fontSize: 16,
+                    //             fontWeight: 'bold',
+                    //             color: '#333'
+                    //         }}>
+                    //             {progressPercent}% Completed
+                    //         </Text>
+                    //     </View>
+                    // </View>
                 );
 
             case 'completed':
                 return (
                     <View style={styles.infoBox}>
                         <MaterialCommunityIcons name="check-circle" size={40} color="#10B981" style={{ marginBottom: 10 }} />
-                        <Text style={styles.title}>Data is Downloaded successfully.</Text>
+                        <Text style={styles.title}>Data is updated successfully.</Text>
 
-
+                        <View style={styles.statsContainer}>
+                            <Text style={styles.completedStats}>
+                                Downloaded Records: {totalItems}
+                            </Text>
+                        </View>
                     </View>
                 );
 

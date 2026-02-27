@@ -1,4 +1,4 @@
-import { ActivityIndicator, FlatList, Image, Modal, ScrollView, StyleSheet, Text, ToastAndroid, TouchableOpacity, View, TextInput, NativeModules, Platform } from 'react-native'
+import { ActivityIndicator, FlatList, Image, Modal, ScrollView, StyleSheet, Text, ToastAndroid, TouchableOpacity, View, TextInput, NativeModules, Platform, Alert } from 'react-native'
 import React, { useCallback, useEffect, useState } from 'react'
 import colors from '../CommonFiles/Colors'
 import Bottomtab from '../Component/Bottomtab';
@@ -15,6 +15,14 @@ import LocationAndNetworkChecker from '../CommonFiles/LocationAndNetworkChecker'
 import { Checkbox } from "react-native-paper";
 import { ENDPOINTS } from '../CommonFiles/Constant';
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
+import FastImage from 'react-native-fast-image';
+import RNFS from 'react-native-fs';
+import { unzip } from 'react-native-zip-archive';
+import SQLite from 'react-native-sqlite-storage';
+import BackgroundTimer from "react-native-background-timer";
+
+import { startSyncService, stopSyncService, updateSyncNotification } from '../../SyncNotification';
+
 
 const { ForegroundService } = NativeModules;
 
@@ -38,6 +46,8 @@ const SettingScreen = () => {
     const [showModal, setShowModal] = useState(false);
     const [syncPhase, setSyncPhase] = useState("checking");
     const [dummydata, setDummydata] = useState(null);
+    const [syncMessageTitle, setSyncMessageTitle] = useState("");  // big text
+    const [syncMessage, setSyncMessage] = useState("");
 
     const [dropdownData] = useState([
 
@@ -91,7 +101,260 @@ const SettingScreen = () => {
 
     const filteredStates = StateData.filter((item) =>
         item.label.toLowerCase().includes(searchQuery.toLowerCase())
+
     );
+
+    let backgroundModeActive = false;
+
+    // ===============================
+    // ⏳ BACKGROUND MODE (Critical)
+    // ===============================
+    const startBackgroundMode = () => {
+        if (backgroundModeActive) return;
+        backgroundModeActive = true;
+
+        BackgroundTimer.runBackgroundTimer(() => { }, 4000);
+        console.log("🟡 Background Mode Activated (JS kept alive)");
+    };
+
+    const stopBackgroundMode = () => {
+        try {
+            BackgroundTimer.stopBackgroundTimer();
+            console.log("🟢 Background Mode Stopped");
+        } catch (e) {
+            console.log("⚠ Background timer stop failed:", e.message);
+        }
+        backgroundModeActive = false;
+    };
+
+    // 🔒 Force close DB before deleting file
+    const closeExistingDB = async () => {
+        const internalPath = `${RNFS.DocumentDirectoryPath}/VehicleDB.db`;
+        try {
+            const db = await SQLite.openDatabase({ name: internalPath, location: 'default', readOnly: true });
+            await db.close();
+            console.log("🔒 Database closed successfully");
+        } catch (e) {
+            console.log("⚠️ Database was not open or already closed:", e.message);
+        }
+    };
+    // 🔹 Sync data from file (modified for internal storage)
+    const syncDataFromFile = async () => {
+        startBackgroundMode();
+        // startSyncService(); // 🔥 Start notification foreground service
+        // updateSyncNotification("Starting sync...");
+
+        const userId = await AsyncStorage.getItem('staff_id');
+        KeepAwake.activate();
+        try {
+            setDownloadLoading(true);
+            setProgressPercent(0);
+            setSyncPhase("downloading");
+
+            const zipUrl = `https://admin.elinacorporation.in/sqlite/full_vehicle_detail.zip?v=${Date.now()}`;
+            const zipPath = `${RNFS.DocumentDirectoryPath}/full_vehicle_detail.zip`;
+            const extractPath = `${RNFS.DocumentDirectoryPath}/dbfile`;
+            const deviceDBPath = `${RNFS.DocumentDirectoryPath}/VehicleDB.db`;
+
+            // ===== Delete old ZIP =====
+            console.log("Checking if old zip exists at:", zipPath);
+            // updateSyncNotification("Deleting old ZIP...");
+            if (await RNFS.exists(zipPath)) {
+                await RNFS.unlink(zipPath);
+                console.log("🗑️ Old zip file deleted");
+            }
+
+            // ===== Delete extracted folder =====
+            console.log("Checking if extracted folder exists:", extractPath);
+            // updateSyncNotification("Cleaning extracted folder...");
+            if (await RNFS.exists(extractPath)) {
+                try {
+                    await RNFS.unlink(extractPath);
+                    console.log("🗑️ Old extracted folder deleted");
+                } catch (err) {
+                    console.log("⚠️ Failed to delete extracted folder:", err.message);
+                }
+            }
+
+            // ===== Delete old DB (THIS WAS FAILING EARLIER) =====
+            console.log("Checking if old DB exists at:", deviceDBPath);
+            // updateSyncNotification("Deleting old database...");
+            if (await RNFS.exists(deviceDBPath)) {
+                console.log("🔒 Closing DB before deletion...");
+                await closeExistingDB();
+
+                // Wait for OS to release file lock
+                await new Promise(r => setTimeout(r, 500));
+
+                await RNFS.unlink(deviceDBPath);
+                console.log("🗑️ Old VehicleDB.db deleted from internal storage");
+            }
+
+            await AsyncStorage.removeItem("totalVehicleCount");
+
+            // ===== Create extract folder again =====
+            // updateSyncNotification("Preparing for extraction...");
+            if (!(await RNFS.exists(extractPath))) {
+                await RNFS.mkdir(extractPath);
+                console.log("✅ Created extract folder:", extractPath);
+            }
+
+            // ===== Download ZIP =====
+            console.log("📥 Downloading from:", zipUrl);
+            // updateSyncNotification("Downloading...");
+            const download = RNFS.downloadFile({
+                fromUrl: zipUrl,
+                toFile: zipPath,
+                progressDivider: 1,
+                begin: (res) => {
+                    console.log("🚀 Download started...");
+                    setSyncPhase("downloading");
+                    setProgressPercent(0);
+                    // updateSyncNotification("Downloading... 0%");
+                },
+                progress: (res) => {
+                    const percent = Math.floor((res.bytesWritten / res.contentLength) * 100);
+                    setProgressPercent(percent);
+                    // updateSyncNotification(`Downloading... ${percent}%`);
+                },
+            });
+
+            const res = await download.promise;
+            if (res.statusCode != 200) throw new Error(`Download failed (${res.statusCode})`);
+            console.log("✅ ZIP downloaded:", zipPath);
+
+            const zipStat = await RNFS.stat(zipPath);
+            console.log("📦 ZIP file size (bytes):", zipStat.size);
+            console.log("📦 ZIP file size (MB):", (zipStat.size / (1024 * 1024)).toFixed(2), "MB");
+            // updateSyncNotification("Extracting...");
+            setSyncPhase("extracting");
+            setSyncMessageTitle("Extracting Files...");
+            setSyncMessage("Unzipping database...");
+
+            // Unzipping process
+            await unzip(zipPath, extractPath);
+            console.log("✅ Unzipped to:", extractPath);
+            setSyncMessage("Searching extracted database file...");
+
+            // Find .sqlite file
+            const files = await RNFS.readDir(extractPath);
+            const sqliteFile = files.find((f) => f.name.endsWith(".sqlite"));
+            if (!sqliteFile) throw new Error("No .sqlite file found in extracted folder");
+            console.log("✅ Extracted SQLite file found:", sqliteFile.path);
+
+            const extractedDBPath = sqliteFile.path;
+
+            // Debugging extracted DB file size
+            const extractedDBStat = await RNFS.stat(extractedDBPath);
+            console.log("✅ Extracted SQLite file size:", extractedDBStat.size);
+
+            setSyncMessageTitle("Copying Database...");
+            setSyncMessage("Moving database to internal storage...");
+            // Move the SQLite file to internal storage
+            await RNFS.moveFile(sqliteFile.path, deviceDBPath);
+            console.log("✅ DB moved to internal storage:", deviceDBPath);
+
+            // Check the DB file size after moving
+            const movedDBStat = await RNFS.stat(deviceDBPath);
+            console.log("✅ Moved SQLite DB file size:", movedDBStat.size);
+
+            // Open DB from internal storage
+            setSyncMessageTitle("Opening Database...");
+            setSyncMessage("Initializing database...");
+            const db = await SQLite.openDatabase({ name: deviceDBPath, location: 'default' });
+            console.log("✅ Database opened successfully from internal storage");
+
+            console.log("⚡ Creating indexes…");
+            setSyncMessageTitle("Optimizing Database...");
+            setSyncMessage("Creating indexes for fast search...");
+            await db.executeSql(`
+                CREATE INDEX IF NOT EXISTS idx_reg_last_state_status 
+                ON full_vehicle_detail (reg_last, state_code, vehicle_status);
+              `);
+
+            await db.executeSql(`
+                CREATE INDEX IF NOT EXISTS idx_chassis_last_state_status 
+                ON full_vehicle_detail (chassis_last, state_code, vehicle_status);
+              `);
+
+            await db.executeSql(`
+                CREATE INDEX IF NOT EXISTS idx_eng_last_state_status 
+                ON full_vehicle_detail (eng_last, state_code, vehicle_status);
+              `);
+
+            await db.executeSql(`
+                CREATE INDEX IF NOT EXISTS idx_finance_name 
+                ON full_vehicle_detail (vehicle_finance_name);
+              `);
+
+            await db.executeSql("PRAGMA analysis_limit=4000;");
+            await db.executeSql("PRAGMA optimize;");
+            console.log("⚡ Indexes created");
+
+            setSyncMessageTitle("Finalizing...");
+            setSyncMessage("Counting records...");
+            const [result] = await db.executeSql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='full_vehicle_detail';"
+            );
+
+            if (result.rows.length == 0) {
+                console.log("❌ Table 'full_vehicle_detail' not found!");
+                Alert.alert("Error", "Try Again after some time.");
+            } else {
+                const [countResult] = await db.executeSql(
+                    "SELECT COUNT(*) as total FROM full_vehicle_detail"
+                );
+                const total = countResult.rows.item(0).total;
+                console.log("📊 Total rows:", total);
+                // Alert.alert("✅ Sync Complete", `Imported ${total} rows from file`);
+                setTotalItems(total);
+                await AsyncStorage.setItem("totalVehicleCount", String(total));
+            }
+
+            // updateSyncNotification("Sync Completed!");
+            setSyncPhase("completed");
+            setProgressPercent(100);
+            await Updatesyncstatus();
+
+        } catch (error) {
+            console.log("❌ Sync failed:", error.message);
+            Alert.alert("Error", "Failed to sync data from file");
+            setSyncPhase("available");
+        } finally {
+            setDownloadLoading(false);
+            setLoadingDone(true);
+            stopBackgroundMode();
+            KeepAwake.deactivate();
+            // stopSyncService();
+        }
+    };
+
+    const Updatesyncstatus = async () => {
+        const userId = await AsyncStorage.getItem('staff_id');
+        if (!userId) {
+            console.log("❌ User ID not found");
+            return;
+        }
+
+        try {
+            const response = await fetch(`${ENDPOINTS.update_sync_status}?staff_id=${userId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            const result = await response.json();
+
+            if (result.code == 200) {
+                console.log('success');
+            } else {
+                console.log('❌ Error: Failed ');
+            }
+        } catch (error) {
+            console.log('❌ Error checking for update sync status:', error.message);
+        }
+    };
 
     const checkForUpdate = async () => {
         setSyncPhase('checking');
@@ -574,7 +837,7 @@ const SettingScreen = () => {
             case 'checking':
                 return (
                     <View style={{ alignItems: 'center' }}>
-                        <MaterialCommunityIcons name="sync" size={40} color={colors.Brown} style={{ marginBottom: 10 }} />
+                        <MaterialCommunityIcons name="sync" size={40} color="#2563EB" style={{ marginBottom: 10 }} />
                         <Text style={styles.modalTitle}>Checking for update...</Text>
                         <ActivityIndicator size="large" color={colors.Brown} style={{ marginTop: 20 }} />
                     </View>
@@ -583,7 +846,7 @@ const SettingScreen = () => {
             case 'available':
                 return (
                     <View style={{ alignItems: 'center' }}>
-                        <MaterialCommunityIcons name="update" size={40} color={colors.Brown} style={{ marginBottom: 10 }} />
+                        <MaterialCommunityIcons name="update" size={40} color="#2563EB" style={{ marginBottom: 10 }} />
                         <Text style={styles.modalTitle}>Data update available!</Text>
                         <Text style={styles.modalSubtitle}>Do you want to sync all data now?</Text>
 
@@ -601,7 +864,8 @@ const SettingScreen = () => {
                                     setShowModal(false);
                                     setLoadingDone(false);
                                     setDownloadLoading(true);
-                                    loadAllVehiclesPaginated("yes");
+                                    // loadAllVehiclesPaginated("yes");
+                                    syncDataFromFile();
                                 }}
                             >
                                 <Text style={{ color: '#fff', fontFamily: 'Inter-Medium' }}>Sync</Text>
@@ -621,17 +885,35 @@ const SettingScreen = () => {
             case 'downloading':
                 return (
                     <View style={{ alignItems: 'center' }}>
-                        <MaterialCommunityIcons name="download" size={40} color={colors.Brown} style={{ marginBottom: 10 }} />
+                        <FastImage
+                            source={require('../assets/animations/loader.gif')} // 👈 update path accordingly
+                            style={{
+                                width: 50,
+                                height: 50,
+                                marginBottom: 10,
+                                alignSelf: 'center',
+                            }}
+                            resizeMode='contain'
+                        />
                         <Text style={styles.modalTitle}>Downloading Data...</Text>
                         <Progress.Bar
                             progress={progressPercent / 100}
                             width={250}
                             height={10}
                             borderRadius={5}
-                            color="#050505ff"
+                            color="#29030b"
                             style={{ marginTop: 15 }}
                         />
                         <Text style={styles.progressText}>{progressPercent}% Completed</Text>
+                    </View>
+                );
+
+            case 'extracting':
+                return (
+                    <View style={{ alignItems: 'center' }}>
+                        <ActivityIndicator size="large" color={colors.Brown} style={{ marginBottom: 15 }} />
+                        <Text style={styles.modalTitle}>{syncMessageTitle}</Text>
+                        <Text style={styles.modalSubtitle}>{syncMessage}</Text>
                     </View>
                 );
 

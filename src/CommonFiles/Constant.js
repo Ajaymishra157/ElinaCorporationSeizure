@@ -39,6 +39,7 @@ export const ENDPOINTS = {
   search_history_paginate: `${BASE_URL}search_history_paginate.php`,
   search_history_search: `${BASE_URL}search_history_search.php`,
   AgencyDetail: `${BASE_URL}agency_detail.php`,
+  update_sync_status: `${BASE_URL}update_sync_status.php`,
 
 
 
